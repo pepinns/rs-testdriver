@@ -1,10 +1,12 @@
 use async_trait::async_trait;
-use futures::{io::BufReader, AsyncBufReadExt, AsyncReadExt, FutureExt, StreamExt, TryFutureExt};
+use futures::{
+    io::BufReader, AsyncBufReadExt, AsyncReadExt, FutureExt, StreamExt, TryFutureExt, TryStreamExt,
+};
 use std::{future::Future, io::BufRead, time::Duration};
 use tokio::time::timeout;
 
 use crate::error::Error;
-use async_process::{Child, ChildStdout, Command};
+use async_process::{Child, ChildStderr, ChildStdout, Command};
 
 // type EmptyResultFuture = impl Future<Output = Result<(), Error>>;
 
@@ -12,6 +14,7 @@ pub struct Driver<T> {
     pub child: Child,
     pub strategy: T,
     stdout: BufReader<ChildStdout>,
+    // stderr: BufReader<ChildStderr>,
 }
 
 impl<T> Driver<T>
@@ -19,6 +22,18 @@ where
     T: Strategy,
 {
     pub fn new(mut child: Child, strategy: T) -> Self {
+        if child.stderr.is_some() {
+            let stderr = BufReader::new(child.stderr.take().unwrap());
+            tokio::spawn(async move {
+                stderr
+                    .lines()
+                    .for_each(|line| {
+                        println!("child stderr: {}", line.unwrap());
+                        futures::future::ready(())
+                    })
+                    .await;
+            });
+        }
         if child.stdout.is_some() {
             let stdout = BufReader::new(child.stdout.take().unwrap());
             return Self {
@@ -31,7 +46,7 @@ where
     }
     pub async fn wait_for_ready(&mut self) -> Result<(), Error> {
         let wait_future = self.strategy.wait_for_ready(&mut self.stdout);
-        timeout(Duration::from_secs(10), wait_future).await?
+        timeout(Duration::from_secs(200), wait_future).await?
     }
 
     pub async fn stop(&mut self) -> Result<(), Error> {
@@ -48,9 +63,14 @@ where
     }
 }
 
+impl<T> Drop for Driver<T> {
+    fn drop(&mut self) {
+        // self.child.kill().unwrap_or(());
+    }
+}
+
 #[async_trait]
 pub trait Strategy {
-    // fn wait_for_ready(&self, out: &mut BufReader<ChildStdout>) -> EmptyResultFuture;
     async fn wait_for_ready(&self, out: &mut BufReader<ChildStdout>) -> Result<(), Error>;
 }
 
