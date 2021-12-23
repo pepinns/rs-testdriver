@@ -4,6 +4,7 @@ use futures::{
 };
 use std::{future::Future, io::BufRead, time::Duration};
 use tokio::time::timeout;
+use tracing::trace;
 
 use crate::error::Error;
 use async_process::{Child, ChildStderr, ChildStdout, Command};
@@ -28,7 +29,7 @@ where
                 stderr
                     .lines()
                     .for_each(|line| {
-                        println!("child stderr: {}", line.unwrap());
+                        trace!("child stderr: {}", line.unwrap());
                         futures::future::ready(())
                     })
                     .await;
