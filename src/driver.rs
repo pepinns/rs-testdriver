@@ -4,7 +4,7 @@ use futures::{
 };
 use std::{future::Future, io::BufRead, time::Duration};
 use tokio::time::timeout;
-use tracing::trace;
+use tracing::{debug, info, trace};
 
 use crate::error::Error;
 use async_process::{Child, ChildStderr, ChildStdout, Command};
@@ -45,15 +45,15 @@ where
         }
         todo!("wtf")
     }
-    pub async fn wait_for_ready(&mut self) -> Result<(), Error> {
+    pub async fn wait_for_ready(&mut self, duration: Duration) -> Result<(), Error> {
         let wait_future = self.strategy.wait_for_ready(&mut self.stdout);
-        timeout(Duration::from_secs(200), wait_future).await?
+        timeout(duration, wait_future).await?
     }
 
     pub async fn stop(&mut self) -> Result<(), Error> {
         self.child.kill()?;
         let wait_future = self.child.status().map(|res| {
-            println!("Results: {:?}", &res);
+            trace!("Results: {:?}", &res);
             let o: Result<(), Error> = match res {
                 Ok(status) => Ok(()),
                 Err(e) => Err(e.into()),
@@ -66,21 +66,33 @@ where
 
 impl<T> Drop for Driver<T> {
     fn drop(&mut self) {
-        // self.child.kill().unwrap_or(());
+        self.child.kill().unwrap_or(());
     }
 }
 
 #[async_trait]
 pub trait Strategy {
-    async fn wait_for_ready(&self, out: &mut BufReader<ChildStdout>) -> Result<(), Error>;
+    async fn wait_for_ready(&mut self, out: &mut BufReader<ChildStdout>) -> Result<(), Error>;
 }
 
 pub struct StdoutStrategy {
     pub match_str: String,
+    pub ready: bool,
+}
+impl StdoutStrategy {
+    pub fn new(match_str: impl Into<String>) -> Self {
+        Self {
+            match_str: match_str.into(),
+            ready: false,
+        }
+    }
 }
 #[async_trait]
 impl Strategy for StdoutStrategy {
-    async fn wait_for_ready(&self, out: &mut BufReader<ChildStdout>) -> Result<(), Error> {
+    async fn wait_for_ready(&mut self, out: &mut BufReader<ChildStdout>) -> Result<(), Error> {
+        if self.ready {
+            return Ok(());
+        }
         let mut linestream = out.lines();
 
         loop {
@@ -89,10 +101,11 @@ impl Strategy for StdoutStrategy {
                     // handle line by matching.
 
                     if line.contains(&self.match_str) {
-                        println!("{} matched {}", line, &self.match_str);
+                        info!("{} matched {}", line, &self.match_str);
+                        self.ready = true;
                         return Ok(());
                     } else {
-                        println!("{} not matched {}", &line, &self.match_str);
+                        debug!("{} not matched {}", &line, &self.match_str);
                     }
                 }
                 Some(Err(e)) => {
@@ -126,11 +139,12 @@ mod tests {
             cmd,
             StdoutStrategy {
                 match_str: "Yay!".to_string(),
+                ready: false,
             },
         );
 
         driver
-            .wait_for_ready()
+            .wait_for_ready(Duration::from_secs(2))
             .await
             .expect("Expect it to complete");
     }
@@ -146,13 +160,14 @@ mod tests {
             cmd,
             StdoutStrategy {
                 match_str: "Yay!".to_string(),
+                ready: false,
             },
         );
 
         driver
-            .wait_for_ready()
+            .wait_for_ready(Duration::from_secs(2))
             .await
-            .expect("Expect it to complete");
+            .expect_err("Expect it to complete");
     }
 
     #[tokio::test]
@@ -169,13 +184,14 @@ mod tests {
             cmd,
             StdoutStrategy {
                 match_str: "Yay!".to_string(),
+                ready: false,
             },
         );
 
         let res = stdin.write_all("Some\nOutput\nYay!\n".as_bytes()).await;
 
         driver
-            .wait_for_ready()
+            .wait_for_ready(Duration::from_secs(2))
             .await
             .expect("Expect it to complete");
 
