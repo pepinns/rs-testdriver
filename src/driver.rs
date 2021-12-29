@@ -4,7 +4,7 @@ use futures::{
 };
 use std::{future::Future, io::BufRead, time::Duration};
 use tokio::time::timeout;
-use tracing::{debug, info, trace};
+use tracing::{debug, error, info, trace};
 
 use crate::error::Error;
 use async_process::{Child, ChildStderr, ChildStdout, Command};
@@ -93,6 +93,7 @@ impl Strategy for StdoutStrategy {
         if self.ready {
             return Ok(());
         }
+
         let mut linestream = out.lines();
 
         loop {
@@ -116,6 +117,7 @@ impl Strategy for StdoutStrategy {
         }
 
         //return err if not matched
+        error!("Did not match anything");
         Err(Error::Unknown)
     }
 }
