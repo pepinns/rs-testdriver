@@ -3,8 +3,11 @@
 #![feature(decl_macro)]
 #![feature(exit_status_error)]
 
+mod cmd;
 pub mod driver;
 pub mod error;
 mod freeip;
 
+pub use async_process::{Command, Stdio};
+pub use cmd::CmdBuilder;
 pub use freeip::FreeIp;
