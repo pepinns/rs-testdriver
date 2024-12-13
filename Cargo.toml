@@ -6,12 +6,12 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-async-process = "1.3.0"
-async-trait = "0.1.51"
-futures = "0.3.18"
-tokio = { version = "1.21.2", features = ["full", "test-util" ] }
+async-process = "^1"
+async-trait = "^0.1"
+futures = "^0.3"
+tokio = { version = "^1", features = ["full", "test-util"] }
 tracing = { version = "0.1.40", default-features = false, features = [
-    "attributes",
-    "log",
+  "attributes",
+  "log",
 ] }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
