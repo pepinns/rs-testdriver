@@ -51,6 +51,8 @@ impl NsDriver {
     }
     pub fn stop(&mut self) -> Result<()> {
         self.child.signal(unshare::Signal::SIGTERM)?;
+        std::thread::sleep(Duration::from_millis(200));
+        self.child.kill()?;
         let st = self.child.wait()?;
         Ok(())
     }
