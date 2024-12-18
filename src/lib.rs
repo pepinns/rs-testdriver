@@ -7,6 +7,7 @@ mod cmd;
 pub mod driver;
 pub mod error;
 mod freeip;
+pub mod nsdriver;
 
 pub use async_process::{Command, Stdio};
 pub use cmd::CmdBuilder;
