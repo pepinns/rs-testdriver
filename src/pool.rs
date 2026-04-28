@@ -1,8 +1,8 @@
 //! A pool of pre-started nodes for use in integration tests.
 //!
 //! Spinning up a fresh [`Node`] per test is slow because initialization can be costly.
-//! [`NodePool`] amortizes that cost by pre-starting N
-//! nodes once and lending them to tests on demand. A test calls [`NodePool::checkout`] to
+//! [`NodePool`] amortizes that cost by pre-starting N nodes and lending them to tests on
+//! demand. A test calls [`NodePool::checkout`] to
 //! receive a [`NodeGuard`]; when the guard is dropped the node is reset and returned to the
 //! pool, ready for the next test. If all nodes are currently checked out, `checkout` blocks
 //! until one becomes available.
@@ -201,10 +201,6 @@ impl<T: NodeLike + 'static> Drop for NodeGuard<T> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// SharedPool — process-wide singleton pool
-// ---------------------------------------------------------------------------
-
 /// A lazily-initialized, process-wide [`NodePool`] intended for integration
 /// tests. Declare one `static` per test binary and share it across all tests
 /// to avoid paying node startup cost more than once.
@@ -236,11 +232,8 @@ impl<T: NodeFactory> SharedPool<T> {
         }
     }
 
-    /// Return the shared pool, initializing it on the first call.
-    ///
-    /// `init` is called at most once; subsequent calls return the cached pool
-    /// without invoking the closure. Panics if `init` returns an error —
-    /// a pool that fails to start is a fatal configuration error.
+    /// Returns the shared pool, initializing it on the first call.
+    /// Panics if `init` returns an error.
     pub async fn get_or_init<F, Fut>(&'static self, init: F) -> &'static NodePool<T>
     where
         F: FnOnce() -> Fut + Send,
@@ -254,12 +247,7 @@ impl<T: NodeFactory> SharedPool<T> {
     }
 }
 
-/// Read a pool size from an environment variable, falling back to `default`.
-///
-/// Useful inside [`SharedPool::get_or_init`] closures:
-/// ```rust,ignore
-/// pool_size_from_env("MY_TEST_POOL_SIZE", 3)
-/// ```
+/// Returns a pool size from an environment variable, falling back to `default`.
 pub fn pool_size_from_env(var: &str, default: usize) -> usize {
     std::env::var(var)
         .ok()
@@ -273,9 +261,19 @@ mod tests {
     use crate::mock_node::MockNode;
     use std::sync::atomic::Ordering;
 
-    // -------------------------------------------------------------------------
-    // Tests
-    // -------------------------------------------------------------------------
+    // Demonstrates the CONFIG associated type: typed connection details are
+    // available from the checked-out node without parsing a connection string.
+    #[tokio::test]
+    async fn test_node_config_accessible_after_checkout() {
+        let pool = NodePool::<MockNode>::with_count(1)
+            .start()
+            .await
+            .expect("should create pool");
+
+        let guard = pool.checkout().await;
+        let cfg = guard.node().config();
+        assert_eq!(cfg.connection_string, guard.node().connection_string());
+    }
 
     #[tokio::test]
     async fn test_nodegroup_can_checkout_and_use_node() {
@@ -299,10 +297,8 @@ mod tests {
         {
             let guard = pool.checkout().await;
             guard.node().create_table("leftover");
-            // guard dropped here — spawns background FullReinit
         }
 
-        // blocks until FullReinit completes and the node is back in the channel
         let guard = pool.checkout().await;
         assert!(
             !guard.node().has_table("leftover"),
@@ -362,8 +358,6 @@ mod tests {
         let guard1 = pool.checkout().await;
         let guard2 = pool.checkout().await;
 
-        // With both nodes checked out, a third checkout must block.
-        // Race it against a short timeout — it should not complete.
         let pool_clone = pool.clone();
         let blocked = tokio::time::timeout(Duration::from_millis(500), pool_clone.checkout()).await;
         assert!(
@@ -371,8 +365,6 @@ mod tests {
             "checkout should block while pool is exhausted"
         );
 
-        // Returning guard2 triggers a background reset; once that finishes
-        // the node re-enters the channel and the pending checkout can proceed.
         drop(guard2);
 
         let _guard3 = tokio::time::timeout(Duration::from_secs(60), pool.checkout())
@@ -404,16 +396,11 @@ mod tests {
             let pool = pool.clone();
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
-                // All tasks race to checkout at the same moment.
                 barrier.wait().await;
                 let guard = tokio::time::timeout(Duration::from_secs(120), pool.checkout())
                     .await
                     .expect("checkout timed out");
 
-                // Atomically swap in_use false -> true. If another task already
-                // holds this node concurrently the swap returns true, failing the
-                // assertion. reset() unconditionally clears in_use before the
-                // node is returned to the pool.
                 let was_in_use = guard.node().in_use.swap(true, Ordering::SeqCst);
                 assert!(
                     !was_in_use,
@@ -421,7 +408,6 @@ mod tests {
                 );
 
                 tokio::time::sleep(Duration::from_millis(10)).await;
-                // in_use is cleared by MockNode::reset() on drop
             }));
         }
 
@@ -453,7 +439,6 @@ mod tests {
                     let _guard = tokio::time::timeout(Duration::from_secs(120), pool.checkout())
                         .await
                         .expect("checkout timed out");
-                    // hold briefly then drop, triggering background reset+return
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }));
@@ -463,11 +448,8 @@ mod tests {
             h.await.expect("task panicked");
         }
 
-        // Background resets on MockNode are instant; a short sleep is enough.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Drain the pool: we should be able to checkout exactly POOL_SIZE nodes
-        // without blocking, and a (POOL_SIZE+1)th checkout must block.
         let mut guards = Vec::with_capacity(POOL_SIZE);
         for _ in 0..POOL_SIZE {
             let g = tokio::time::timeout(Duration::from_secs(5), pool.checkout())
@@ -495,22 +477,13 @@ mod tests {
             .expect("should create pool");
 
         let guard = pool.checkout().await;
-        drop(pool); // pool gone — channel receiver is closed
+        drop(pool);
 
-        // Dropping the guard now spawns a background task that calls reset then
-        // tries to send back into the closed channel. That send returns Err and
-        // the node is discarded — no panic.
         drop(guard);
 
-        // Give the background task time to run.
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // -------------------------------------------------------------------------
-    // SharedPool tests
-    // -------------------------------------------------------------------------
-
-    // SharedPool must be 'static so we use a module-level static here.
     static TEST_SHARED_POOL: SharedPool<MockNode> = SharedPool::new();
 
     #[tokio::test]

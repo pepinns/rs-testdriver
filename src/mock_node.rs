@@ -1,47 +1,43 @@
 //! A lightweight in-memory [`NodeLike`] + [`NodeFactory`] implementation for use in tests.
 //!
-//! [`MockNode`] has no external dependencies and initializes instantly. It stores
-//! tables and values in memory, making it suitable for verifying pool behaviour
-//! (reset strategies, concurrent checkout, pool draining, etc.) without spinning
-//! up any real process.
+//! [`MockNode`] has no external dependencies and initializes instantly, making it
+//! suitable for testing pool behaviour without spinning up any real process.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::pool::{NodeFactory, NodeLike, ResetStrategy};
 
 static MOCK_NODE_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// Typed configuration returned by [`MockNode::config`].
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct MockNodeConfig {
+    pub id: usize,
+    pub connection_string: String,
+}
+
+#[derive(Default)]
 struct MockNodeState {
     tables: HashSet<String>,
     values: HashMap<String, Vec<i32>>,
 }
 
-impl MockNodeState {
-    fn new() -> Self {
-        Self {
-            tables: HashSet::new(),
-            values: HashMap::new(),
-        }
-    }
-}
-
 pub struct MockNode {
     id: usize,
-    /// Toggled true by a test when it holds the node; `reset()` always clears it.
-    /// Used to detect concurrent double-checkout of the same node.
-    pub in_use: Arc<AtomicBool>,
-    state: Arc<Mutex<MockNodeState>>,
+    /// Set to `true` while checked out; cleared by `reset()`. Detects double-checkout.
+    pub in_use: AtomicBool,
+    state: Mutex<MockNodeState>,
 }
 
 impl MockNode {
     pub fn new() -> Self {
         Self {
             id: MOCK_NODE_ID.fetch_add(1, Ordering::Relaxed),
-            in_use: Arc::new(AtomicBool::new(false)),
-            state: Arc::new(Mutex::new(MockNodeState::new())),
+            in_use: AtomicBool::new(false),
+            state: Mutex::new(MockNodeState::default()),
         }
     }
 
@@ -75,8 +71,17 @@ impl MockNode {
 }
 
 impl NodeLike for MockNode {
+    type CONFIG = MockNodeConfig;
+
     fn connection_string(&self) -> String {
         format!("mock://node-{}", self.id)
+    }
+
+    fn config(&self) -> MockNodeConfig {
+        MockNodeConfig {
+            id: self.id,
+            connection_string: self.connection_string(),
+        }
     }
 
     async fn wait_for_ready(&mut self, _timeout: Duration) -> anyhow::Result<()> {
@@ -84,7 +89,6 @@ impl NodeLike for MockNode {
     }
 
     async fn reset(&mut self, strategy: &ResetStrategy) -> anyhow::Result<()> {
-        // Always clear the exclusivity flag regardless of strategy.
         self.in_use.store(false, Ordering::SeqCst);
         let mut state = self.state.lock().unwrap();
         match strategy {
@@ -98,12 +102,9 @@ impl NodeLike for MockNode {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct MockNodeOptions;
-
 impl NodeFactory for MockNode {
-    type Options = MockNodeOptions;
-    fn create(_opts: Self::Options) -> Self {
+    type Options = ();
+    fn create(_opts: ()) -> Self {
         MockNode::new()
     }
 }
