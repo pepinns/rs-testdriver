@@ -20,8 +20,9 @@
 //!   cleanup. Use when tests manage their own transactions or truncations.
 
 use std::{sync::Arc, time::Duration};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OnceCell};
 
+#[derive(Clone)]
 pub enum ResetStrategy {
     /// Stop the node, wipe its state, and reinitialize from scratch. Fully isolated.
     FullReinit,
@@ -198,6 +199,72 @@ impl<T: NodeLike + 'static> Drop for NodeGuard<T> {
             });
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// SharedPool — process-wide singleton pool
+// ---------------------------------------------------------------------------
+
+/// A lazily-initialized, process-wide [`NodePool`] intended for integration
+/// tests. Declare one `static` per test binary and share it across all tests
+/// to avoid paying node startup cost more than once.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use testdriver::{NodePool, ResetStrategy, SharedPool, pool_size_from_env};
+///
+/// static POOL: SharedPool<MyNode> = SharedPool::new();
+///
+/// async fn get_pool() -> &'static NodePool<MyNode> {
+///     POOL.get_or_init(|| {
+///         NodePool::<MyNode>::with_count(pool_size_from_env("MY_TEST_POOL_SIZE", 3))
+///             .with_reset_strategy(ResetStrategy::DropTables)
+///             .start()
+///     }).await
+/// }
+/// ```
+pub struct SharedPool<T: NodeFactory> {
+    cell: OnceCell<NodePool<T>>,
+}
+
+impl<T: NodeFactory> SharedPool<T> {
+    /// Create a new, uninitialized `SharedPool`. Suitable for `static` context.
+    pub const fn new() -> Self {
+        Self {
+            cell: OnceCell::const_new(),
+        }
+    }
+
+    /// Return the shared pool, initializing it on the first call.
+    ///
+    /// `init` is called at most once; subsequent calls return the cached pool
+    /// without invoking the closure. Panics if `init` returns an error —
+    /// a pool that fails to start is a fatal configuration error.
+    pub async fn get_or_init<F, Fut>(&'static self, init: F) -> &'static NodePool<T>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: std::future::Future<Output = anyhow::Result<NodePool<T>>> + Send,
+    {
+        self.cell
+            .get_or_init(
+                || async move { init().await.expect("SharedPool: failed to initialize pool") },
+            )
+            .await
+    }
+}
+
+/// Read a pool size from an environment variable, falling back to `default`.
+///
+/// Useful inside [`SharedPool::get_or_init`] closures:
+/// ```rust,ignore
+/// pool_size_from_env("MY_TEST_POOL_SIZE", 3)
+/// ```
+pub fn pool_size_from_env(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -437,5 +504,58 @@ mod tests {
 
         // Give the background task time to run.
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // -------------------------------------------------------------------------
+    // SharedPool tests
+    // -------------------------------------------------------------------------
+
+    // SharedPool must be 'static so we use a module-level static here.
+    static TEST_SHARED_POOL: SharedPool<MockNode> = SharedPool::new();
+
+    #[tokio::test]
+    async fn test_shared_pool_returns_a_working_pool() {
+        let pool = TEST_SHARED_POOL
+            .get_or_init(|| NodePool::<MockNode>::with_count(1).start())
+            .await;
+
+        let guard = pool.checkout().await;
+        guard.node().create_table("shared_smoke");
+        assert!(guard.node().has_table("shared_smoke"));
+    }
+
+    #[tokio::test]
+    async fn test_shared_pool_is_same_instance_on_repeated_calls() {
+        let p1 = TEST_SHARED_POOL
+            .get_or_init(|| NodePool::<MockNode>::with_count(1).start())
+            .await;
+        let p2 = TEST_SHARED_POOL
+            .get_or_init(|| NodePool::<MockNode>::with_count(1).start())
+            .await;
+        assert!(
+            std::ptr::eq(p1, p2),
+            "get_or_init should return the same pool instance on repeated calls"
+        );
+    }
+
+    #[test]
+    fn test_pool_size_from_env_uses_default_when_var_absent() {
+        // Use a name unlikely to be set in CI.
+        std::env::remove_var("RS_TESTDRIVER_POOL_SIZE_ABSENT");
+        assert_eq!(pool_size_from_env("RS_TESTDRIVER_POOL_SIZE_ABSENT", 7), 7);
+    }
+
+    #[test]
+    fn test_pool_size_from_env_reads_var_when_set() {
+        std::env::set_var("RS_TESTDRIVER_POOL_SIZE_SET", "5");
+        assert_eq!(pool_size_from_env("RS_TESTDRIVER_POOL_SIZE_SET", 1), 5);
+        std::env::remove_var("RS_TESTDRIVER_POOL_SIZE_SET");
+    }
+
+    #[test]
+    fn test_pool_size_from_env_uses_default_for_invalid_value() {
+        std::env::set_var("RS_TESTDRIVER_POOL_SIZE_BAD", "not_a_number");
+        assert_eq!(pool_size_from_env("RS_TESTDRIVER_POOL_SIZE_BAD", 3), 3);
+        std::env::remove_var("RS_TESTDRIVER_POOL_SIZE_BAD");
     }
 }

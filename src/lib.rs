@@ -12,10 +12,8 @@ mod freeip;
 pub mod mock_node;
 pub mod nsdriver;
 pub mod pool;
-// pub mod shared;
 
 pub use async_process::{Command, Stdio};
 pub use cmd::CmdBuilder;
 pub use freeip::FreeIp;
 pub use pool::*;
-// pub use shared::*;
