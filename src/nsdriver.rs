@@ -7,6 +7,8 @@ use anyhow::bail;
 use anyhow::Result;
 use unshare::{Child, PipeReader, Stdio};
 
+use crate::drain::drain_blocking;
+
 pub struct NsDriver {
     child: Child,
     // stdout: Lines<BufReader<PipeReader>>,
@@ -29,30 +31,23 @@ impl NsDriver {
 
                 let name_copy = name.clone();
                 let name_out_copy = name.clone();
+                // Both streams are read until the child closes them, whatever it prints: a child
+                // that writes to a full pipe blocks. (`lines()` would stop at the first byte that
+                // is not UTF-8, and the child would block from then on.)
                 std::thread::spawn(move || {
-                    let bf = std::io::BufReader::new(err).lines();
-
-                    for l in bf {
-                        match l {
-                            Ok(line) => println!("[{}](stderr): {}", &name_copy, line),
-                            Err(e) => {
-                                println!("Error from nsdriver {}", &e);
-                                return;
-                            }
-                        }
+                    let result = drain_blocking(err, |line| {
+                        println!("[{}](stderr): {}", &name_copy, line)
+                    });
+                    if let Err(e) = result {
+                        println!("Error from nsdriver {}", &e);
                     }
                 });
                 std::thread::spawn(move || {
-                    let bf = std::io::BufReader::new(out).lines();
-
-                    for l in bf {
-                        match l {
-                            Ok(line) => println!("[{}](stdout): {}", &name_out_copy, line),
-                            Err(e) => {
-                                println!("Error from nsdriver {}", &e);
-                                return;
-                            }
-                        }
+                    let result = drain_blocking(out, |line| {
+                        println!("[{}](stdout): {}", &name_out_copy, line)
+                    });
+                    if let Err(e) = result {
+                        println!("Error from nsdriver {}", &e);
                     }
                 });
                 Ok(Self {

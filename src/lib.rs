@@ -4,6 +4,7 @@
 #![feature(exit_status_error)]
 
 mod cmd;
+mod drain;
 pub mod driver;
 pub mod error;
 mod freeip;
